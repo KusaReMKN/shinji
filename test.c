@@ -160,10 +160,10 @@ set_link(const char *ifname, int up)
 int
 main(int argc, char *argv[])
 {
-	struct ifreq ifr;
 	struct sockaddr_in sin;
-	int sockfd, tunfd;
-	char ifname[IFNAMSIZ] = IFNAME;
+	ssize_t nread;
+	int tunfd;
+	char buf[256], ifname[IFNAMSIZ] = IFNAME;
 
 	// create new interface
 	tunfd = tun_alloc(ifname);
@@ -190,6 +190,19 @@ main(int argc, char *argv[])
 	if (set_link(ifname, 1) == -1)
 		err(1, "set_link");
 
+
+	for (;;) {
+		nread = read(tunfd, buf, sizeof(buf));
+		if (nread == -1)
+			err(1, "read");
+
+		for (ssize_t i = 0; i < nread; i++) {
+			if ((i & 0x0F) == 0)
+				fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+			fprintf(stderr, "%02x ", buf[i] & 0xFF);
+		}
+		fprintf(stderr, "\n%1$#04zx (%1$zd)\n", (size_t)nread);
+	}
 	pause();
 
 	return 0;
