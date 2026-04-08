@@ -2,7 +2,6 @@
 #include <sys/socket.h>
 
 #include <net/if.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include <linux/if_tun.h>
@@ -21,7 +20,6 @@ static int
 tun_alloc(char *ifname)
 {
 	struct ifreq ifr;
-	struct sockaddr_in sin;
 	int error, fd;
 
 	fd = open(TUNPATH, O_RDWR);
@@ -31,7 +29,7 @@ tun_alloc(char *ifname)
 	(void)memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TUN;
 	if (ifname != NULL && *ifname != '\0')
-		(void)strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
+		(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
 
 	if (ioctl(fd, TUNSETIFF, (void *)&ifr) == -1) {
 		error = errno;
@@ -39,9 +37,124 @@ tun_alloc(char *ifname)
 		errno = error;
 		return -1;
 	}
-	(void)strcpy(ifname, ifr.ifr_name);
+	(void)snprintf(ifname, IFNAMSIZ, "%s", ifr.ifr_name);
 
 	return fd;
+}
+
+static int
+set_mtu(const char *ifname, int mtu)
+{
+	struct ifreq ifr;
+	int error, sock;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock == -1)
+		return -1;
+
+	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+	ifr.ifr_mtu = mtu;
+	if (ioctl(sock, SIOCSIFMTU, &ifr) == -1) {
+		error = errno;
+		(void)close(sock);
+		errno = error;
+		return -1;
+	}
+
+	if (close(sock) == -1)
+		return -1;
+
+	return 0;
+}
+
+static int
+set_in_addr(const char *ifname, const struct sockaddr_in *sin)
+{
+	struct ifreq ifr;
+	int error, sock;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock == -1)
+		return -1;
+
+	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+	(void)memcpy(&ifr.ifr_addr, sin, sizeof(*sin));
+	if (ioctl(sock, SIOCSIFADDR, &ifr) == -1) {
+		error = errno;
+		(void)close(sock);
+		errno = error;
+		return -1;
+	}
+
+	if (close(sock) == -1)
+		return -1;
+
+	return 0;
+}
+
+static int
+set_in_netmask(const char *ifname, const struct sockaddr_in *sin)
+{
+	struct ifreq ifr;
+	int error, sock;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock == -1)
+		return -1;
+
+	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+	(void)memcpy(&ifr.ifr_addr, sin, sizeof(*sin));
+	if (ioctl(sock, SIOCSIFNETMASK, &ifr) == -1) {
+		error = errno;
+		(void)close(sock);
+		errno = error;
+		return -1;
+	}
+
+	if (close(sock) == -1)
+		return -1;
+
+	return 0;
+}
+
+static int
+set_link(const char *ifname, int up)
+{
+	struct ifreq ifr;
+	int error, sock;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock == -1)
+		return -1;
+
+	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+	if (ioctl(sock, SIOCGIFFLAGS, &ifr) == -1) {
+		error = errno;
+		(void)close(sock);
+		errno = error;
+		return -1;
+	}
+
+	if (up)
+		ifr.ifr_flags |= IFF_UP;
+	else
+		ifr.ifr_flags &= ~IFF_UP;
+
+	if (ioctl(sock, SIOCSIFFLAGS, &ifr) == -1) {
+		error = errno;
+		(void)close(sock);
+		errno = error;
+		return -1;
+	}
+
+	if (close(sock) == -1)
+		return -1;
+
+	return 0;
 }
 
 int
@@ -59,44 +172,23 @@ main(int argc, char *argv[])
 
 	(void)fprintf(stderr, "ifname: %s\n", ifname);
 
-	// socket for control
-	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sockfd == -1)
-		err(1, "socket");
+	if (set_mtu(ifname, 195) == -1)
+		err(1, "set_mtu");
 
-	// set MTU
-	(void)memset(&ifr, 0, sizeof(ifr));
-	(void)strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
-	ifr.ifr_mtu = 195;
-	if (ioctl(sockfd, SIOCSIFMTU, &ifr) == -1)
-		err(1, "SIOCSIFMTU");
-
-	// set IPv4 addr.
-	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = inet_addr("10.5.2.10");
-	(void)memcpy(&ifr.ifr_addr, &sin, sizeof(sin));
-	(void)strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
-	if (ioctl(sockfd, SIOCSIFADDR, &ifr) == -1)
-		err(1, "SIOCSIFADDR");
+	(void)inet_pton(AF_INET, "10.5.2.10", &sin.sin_addr);
+	if (set_in_addr(ifname, &sin) == -1)
+		err(1, "set_in_addr");
 
-	// set IPv4 netmask
-	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = inet_addr("255.255.255.0");
-	(void)memcpy(&ifr.ifr_netmask, &sin, sizeof(sin));
-	(void)strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
-	if (ioctl(sockfd, SIOCSIFNETMASK, &ifr) == -1)
-		err(1, "SIOCSIFNETMASK");
+	(void)inet_pton(AF_INET, "255.255.255.0", &sin.sin_addr);
+	if (set_in_netmask(ifname, &sin) == -1)
+		err(1, "set_in_netmask");
 
-	// link up
-	(void)memset(&ifr, 0, sizeof(ifr));
-	(void)strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
-	if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) == -1)
-		err(1, "SIOCGIFFLAGS");
-	ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
-	if (ioctl(sockfd, SIOCSIFFLAGS, &ifr) == -1)
-		err(1, "SIOCSIFFLAGS");
+	if (set_link(ifname, 1) == -1)
+		err(1, "set_link");
 
 	pause();
 
