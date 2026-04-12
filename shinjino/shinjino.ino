@@ -27,27 +27,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <deque>
-#include <string>
-#include <utility>
-
-#include <TimerTC3.h>
-
 #define PIN_AUX	(D1)
 
 #define TIC	100
-#define RDELIM	1000
-#define TDELIM	6000
-
-static std::deque<std::pair<uint64_t, std::string>> queue;
-static uint64_t lastSend;
-static volatile uint64_t sysClock;
-
-void
-tcHandler(void)
-{
-	sysClock += TIC;
-}
 
 void
 setup(void)
@@ -62,9 +44,6 @@ setup(void)
 		delayMicroseconds(TIC);
 	Serial1.begin(9600);
 
-	TimerTc3.initialize(TIC);
-	TimerTc3.attachInterrupt(tcHandler);
-
 	while (digitalRead(PIN_AUX) == LOW)
 		delayMicroseconds(TIC);
 }
@@ -75,17 +54,6 @@ loop(void)
 	while (Serial1.available() > 0)
 		Serial.write(Serial1.read());
 
-	while (Serial.available() > 0) {
-		if (queue.empty() || sysClock - queue.back().first > RDELIM)
-			queue.push_back({ sysClock, "" });
-		queue.back().second.push_back(Serial.read());
-		delayMicroseconds(TIC);
-	}
-
-	if (!queue.empty() && sysClock - lastSend > TDELIM
-			&& digitalRead(PIN_AUX) == HIGH) {
-		Serial1.write(queue[0].second.c_str(), queue[0].second.size());
-		queue.pop_front();
-		lastSend = sysClock;
-	}
+	while (Serial.available() > 0)
+		Serial1.write(Serial.read());
 }
