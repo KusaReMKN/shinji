@@ -30,7 +30,7 @@
 #include <sys/ioctl.h>
 #include <sys/param.h>
 #include <sys/select.h>
-#include <sys/socket.h>
+//#include <sys/socket.h>
 
 #include <net/ethernet.h>
 #include <net/if.h>
@@ -42,6 +42,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,19 +56,28 @@
 #define TUNPATH	"/dev/net/tun"
 #define LORAMTU	195
 
+struct loratun {
+	int lora;
+	int tun;
+};
+
 static void init_interface(const char *ifname, int mtu, const char *cidr);
 static void init_lora(int fd);
-static void receive_packet(int lorafd, int tunfd);
-static void transmit_packet(int tunfd, int lorafd);
+//static void receive_packet(int lorafd, int tunfd);
+//static void transmit_packet(int tunfd, int lorafd);
 static void usage(void);
 
+static void *receiver(void *arg);
+static void *transmitter(void *arg);
 static int tun_alloc(char *ifname);
 
 int
 main(int argc, char *argv[])
 {
+	struct loratun lt;
 	fd_set rfds;
-	int lorafd, nfds, tunfd;
+	pthread_t rxthread, txthread;
+	int error, lorafd, nfds, tunfd;
 	char ifname[IFNAMSIZ] = IFNAME;
 
 	if (argc != 3)
@@ -85,22 +95,38 @@ main(int argc, char *argv[])
 		err(EXIT_FAILURE, "tun_alloc");
 	init_interface(ifname, LORAMTU, argv[2]);
 
-	for (;;) {
-		/* LoRa と TUN とを同時に監視する */
-		FD_ZERO(&rfds);
-		FD_SET(lorafd, &rfds);
-		FD_SET(tunfd, &rfds);
-		nfds = MAX(lorafd, tunfd) + 1;
-		if (select(nfds, &rfds, NULL, NULL, NULL) == -1)
-			err(EXIT_FAILURE, "select");
+	/* 受信用スレッドを起動する */
+	lt.lora = lorafd;
+	lt.tun = tunfd;
+	errno = pthread_create(&rxthread, NULL, receiver, (void *)&lt);
+	if (errno != 0)
+		err(EXIT_FAILURE, "pthread_create");
 
-		/* 云いたい相手に応じて相手をする */
-		if (FD_ISSET(lorafd, &rfds)) {
-			receive_packet(lorafd, tunfd);
-		} else {
-			transmit_packet(tunfd, lorafd);
-		}
-	}
+	/* 送信用スレッドを起動する */
+	lt.lora = lorafd;
+	lt.tun = tunfd;
+	errno = pthread_create(&txthread, NULL, transmitter, (void *)&lt);
+	if (errno != 0)
+		err(EXIT_FAILURE, "pthread_create");
+
+	(void)pause();
+
+//	for (;;) {
+//		/* LoRa と TUN とを同時に監視する */
+//		FD_ZERO(&rfds);
+//		FD_SET(lorafd, &rfds);
+//		FD_SET(tunfd, &rfds);
+//		nfds = MAX(lorafd, tunfd) + 1;
+//		if (select(nfds, &rfds, NULL, NULL, NULL) == -1)
+//			err(EXIT_FAILURE, "select");
+//
+//		/* 云いたい相手に応じて相手をする */
+//		if (FD_ISSET(lorafd, &rfds)) {
+//			receive_packet(lorafd, tunfd);
+//		} else {
+//			transmit_packet(tunfd, lorafd);
+//		}
+//	}
 	/* NOTREACHED */
 
 	return EXIT_FAILURE;
@@ -210,24 +236,42 @@ init_lora(int fd)
 }
 
 /**
- * パケットの受信を代行する。
+ * パケットを受信する。
+ * スレッドとして実行される。
+ *
+ * arg: (struct loratun *) LoRa デバイスと TUN デバイス
+ *
+ * 普通は返らない。
  */
-static void
-receive_packet(int lorafd, int tunfd)
+static void *
+receiver(void *arg)
 {
-	ssize_t nbyte, tmp;
+	ssize_t nbyte, psize, tmp;
+	int lorafd, tunfd;
 	char rbuf[ALIGN16(LORAMTU+9)];
 
-	(void)fprintf(stderr, "\nfrom LoRa:");
+	lorafd = ((struct loratun *)arg)->lora;
+	tunfd = ((struct loratun *)arg)->tun;
 
+loop:
+	/* パケット長を読み込む（これは長さに含まれない） */
+	tmp = read(lorafd, rbuf, 1);
+	if (tmp == -1)
+		err(1, "read");
+	psize = rbuf[0] & 0xFF;
+
+	/* パケットの全体を読み込む */
 	nbyte = 0;
 	do {
-		tmp = read(lorafd, rbuf + nbyte, 1);
+		tmp = read(lorafd, rbuf+nbyte+1, psize-nbyte);
 		if (tmp == -1)
 			err(1, "read");
 		nbyte += tmp;
-	} while (nbyte <= ((unsigned)rbuf[0] & 0xFF));
+	} while (nbyte < psize);
+	++nbyte;
 
+	/* とりあえず表示しておく */
+	(void)fprintf(stderr, "\nfrom LoRa:");
 	for (ssize_t i = 0; i < nbyte; i++) {
 		if ((i & 0x0F) == 0x00)
 			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
@@ -235,10 +279,120 @@ receive_packet(int lorafd, int tunfd)
 	}
 	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
 
-	/* その場しのぎで良いのでとりあえず TUN に投げ付ける */
+	/* とりあえず TUN に全て横流しする（XXX） */
 	rbuf[4] = rbuf[5] = 0;
 	if (write(tunfd, rbuf+4, nbyte-5) == -1)
 		err(1, "write");
+
+	goto loop;
+	/* NOTREACHED */
+
+	return NULL;
+}
+
+/**
+ * パケットの受信を代行する。
+ */
+//static void
+//receive_packet(int lorafd, int tunfd)
+//{
+//	ssize_t nbyte, tmp;
+//	char rbuf[ALIGN16(LORAMTU+9)];
+//
+//	(void)fprintf(stderr, "\nfrom LoRa:");
+//
+//	nbyte = 0;
+//	do {
+//		tmp = read(lorafd, rbuf + nbyte, 1);
+//		if (tmp == -1)
+//			err(1, "read");
+//		nbyte += tmp;
+//	} while (nbyte <= ((unsigned)rbuf[0] & 0xFF));
+//
+//	for (ssize_t i = 0; i < nbyte; i++) {
+//		if ((i & 0x0F) == 0x00)
+//			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+//		(void)fprintf(stderr, "%02x ", (unsigned)rbuf[i] & 0xFF);
+//	}
+//	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
+//
+//	/* その場しのぎで良いのでとりあえず TUN に投げ付ける */
+//	rbuf[4] = rbuf[5] = 0;
+//	if (write(tunfd, rbuf+4, nbyte-5) == -1)
+//		err(1, "write");
+//}
+
+/**
+ * パケットを送信する。
+ * スレッドとして実行される。
+ *
+ * arg: (struct loratun *) LoRa デバイスと TUN デバイス
+ *
+ * 普通は返らない。
+ */
+static void *
+transmitter(void *arg)
+{
+	ssize_t nbyte;
+	int lorafd, tunfd;
+	char rbuf[ALIGN16(LORAMTU+sizeof(struct tun_pi))];
+	char tbuf[ALIGN16(LORAMTU+9)];
+	char chksum;
+
+	lorafd = ((struct loratun *)arg)->lora;
+	tunfd = ((struct loratun *)arg)->tun;
+
+loop:
+	/* パケットを読み出す */
+	nbyte = read(tunfd, rbuf, sizeof(rbuf));
+	if (nbyte == -1)
+		err(1, "read");
+
+	/* とりあえず表示しておく */
+	(void)fprintf(stderr, "\nfrom TUN:");
+	for (ssize_t i = 0; i < nbyte; i++) {
+		if ((i & 0x0F) == 0x00)
+			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+		(void)fprintf(stderr, "%02x ", (unsigned)rbuf[i] & 0xFF);
+	}
+	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
+
+	/* 本来であればここで ARP する（XXX） */
+	/* ARP の結果 IPv4 以外は通れなくなるんだけど、よくわからない */
+
+	/* とりあえす LoRa に全て横流しする（XXX） */
+	tbuf[0] = tbuf[1] = 0xFF;	/* 宛先はブロードキャスト */
+	tbuf[2] = 0x07;			/* 宛先は 7 ch */
+	tbuf[3] = tbuf[4] = 0xFF;	/* 送信元もブロードキャスト（？） */
+	tbuf[5] = 0x07;			/* 送信元は 7 ch */
+	for (ssize_t i = 0; i < nbyte-2; i++)
+		tbuf[6+i] = rbuf[2+i];
+	nbyte += 5;		/* - sizeof(pi) + 9 */
+	/* チェックサム計算 */
+	chksum = 0;
+	for (ssize_t i = 0; i < nbyte-1; i++)
+		chksum ^= tbuf[i];
+	tbuf[nbyte-1] = chksum;
+
+	/* とりあえず表示しておく */
+	(void)fprintf(stderr, "\nto LoRa:");
+	for (ssize_t i = 0; i < nbyte; i++) {
+		if ((i & 0x0F) == 0x00)
+			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+		(void)fprintf(stderr, "%02x ", (unsigned)tbuf[i] & 0xFF);
+	}
+	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
+
+	if (write(lorafd, tbuf, (size_t)nbyte) == -1)
+		err(1, "write");
+
+	/* パケット境界を示すために少し待つ */
+	(void)usleep(250000);
+
+	goto loop;
+	/* NOTREACHED */
+
+	return NULL;
 }
 
 /**
@@ -247,68 +401,68 @@ receive_packet(int lorafd, int tunfd)
  * tunfd: TUN デバイス
  * lorafd: LoRa デバイス
  */
-static void
-transmit_packet(int tunfd, int lorafd)
-{
-	struct tun_pi pi;
-	size_t buflen;
-	ssize_t nbyte;
-	char rbuf[ALIGN16(LORAMTU+sizeof(pi))];
-	char tbuf[ALIGN16(LORAMTU+9)];
-	unsigned char chksum;
-
-	(void)fprintf(stderr, "\nfrom TUN:");
-
-	/* パケットを読み出す */
-	nbyte = read(tunfd, rbuf, sizeof(rbuf));
-	if (nbyte == -1)
-		err(1, "read");
-
-	for (ssize_t i = 0; i < nbyte; i++) {
-		if ((i & 0x0F) == 0x00)
-			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
-		(void)fprintf(stderr, "%02x ", (unsigned)rbuf[i] & 0xFF);
-	}
-	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
-
-	/* IPv4 でなければ黙って捨てる */
-	(void)memcpy(&pi, rbuf, sizeof(pi));
-	if (ntohs(pi.proto) != ETHERTYPE_IP) {
-		(void)fprintf(stderr, "not IPv4 packet, discard\n");
-		return ;
-	}
-
-	/* XXX: 本来であればここで ARP する */
-
-	/* パケットを構成する */
-	tbuf[0] = tbuf[1] = 0xFF;	/* ブロードキャスト */
-	tbuf[2] = 0x07;			/* 7 ch */
-	tbuf[3] = tbuf[4] = 0xFF;	/* 自分のアドレスも知らない */
-	tbuf[5] = 0x07;			/* 7 ch */
-	(void)memcpy(tbuf+6, &pi.proto, sizeof(pi.proto));
-	for (ssize_t i = 0; i < nbyte - sizeof(pi); i++)
-		tbuf[8+i] = rbuf[sizeof(pi)+i];
-	buflen = nbyte - sizeof(pi) + 9;
-
-	chksum = 0;
-	for (size_t i = 0; i < buflen-1; i++)
-		chksum ^= tbuf[i];
-	tbuf[buflen-1] = chksum;
-
-	(void)fprintf(stderr, "to LoRa:");
-	for (ssize_t i = 0; i < buflen; i++) {
-		if ((i & 0x0F) == 0x00)
-			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
-		(void)fprintf(stderr, "%02x ", (unsigned)tbuf[i] & 0xFF);
-	}
-	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)buflen, (size_t)buflen);
-
-	if (write(lorafd, tbuf, buflen) == -1)
-		err(1, "write");
-
-	/* ちょっと待つ */
-	(void)usleep(500000);
-}
+//static void
+//transmit_packet(int tunfd, int lorafd)
+//{
+//	struct tun_pi pi;
+//	size_t buflen;
+//	ssize_t nbyte;
+//	char rbuf[ALIGN16(LORAMTU+sizeof(pi))];
+//	char tbuf[ALIGN16(LORAMTU+9)];
+//	unsigned char chksum;
+//
+//	(void)fprintf(stderr, "\nfrom TUN:");
+//
+//	/* パケットを読み出す */
+//	nbyte = read(tunfd, rbuf, sizeof(rbuf));
+//	if (nbyte == -1)
+//		err(1, "read");
+//
+//	for (ssize_t i = 0; i < nbyte; i++) {
+//		if ((i & 0x0F) == 0x00)
+//			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+//		(void)fprintf(stderr, "%02x ", (unsigned)rbuf[i] & 0xFF);
+//	}
+//	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)nbyte, (size_t)nbyte);
+//
+//	/* IPv4 でなければ黙って捨てる */
+//	(void)memcpy(&pi, rbuf, sizeof(pi));
+//	if (ntohs(pi.proto) != ETHERTYPE_IP) {
+//		(void)fprintf(stderr, "not IPv4 packet, discard\n");
+//		return ;
+//	}
+//
+//	/* XXX: 本来であればここで ARP する */
+//
+//	/* パケットを構成する */
+//	tbuf[0] = tbuf[1] = 0xFF;	/* ブロードキャスト */
+//	tbuf[2] = 0x07;			/* 7 ch */
+//	tbuf[3] = tbuf[4] = 0xFF;	/* 自分のアドレスも知らない */
+//	tbuf[5] = 0x07;			/* 7 ch */
+//	(void)memcpy(tbuf+6, &pi.proto, sizeof(pi.proto));
+//	for (ssize_t i = 0; i < nbyte - sizeof(pi); i++)
+//		tbuf[8+i] = rbuf[sizeof(pi)+i];
+//	buflen = nbyte - sizeof(pi) + 9;
+//
+//	chksum = 0;
+//	for (size_t i = 0; i < buflen-1; i++)
+//		chksum ^= tbuf[i];
+//	tbuf[buflen-1] = chksum;
+//
+//	(void)fprintf(stderr, "to LoRa:");
+//	for (ssize_t i = 0; i < buflen; i++) {
+//		if ((i & 0x0F) == 0x00)
+//			(void)fprintf(stderr, "\n%#04zx:\t", (size_t)i);
+//		(void)fprintf(stderr, "%02x ", (unsigned)tbuf[i] & 0xFF);
+//	}
+//	(void)fprintf(stderr, "\n%04zx (%zd)\n", (size_t)buflen, (size_t)buflen);
+//
+//	if (write(lorafd, tbuf, buflen) == -1)
+//		err(1, "write");
+//
+//	/* ちょっと待つ */
+//	(void)usleep(500000);
+//}
 
 /**
  * TUN インタフェイスを作成する。
