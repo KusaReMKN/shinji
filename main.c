@@ -334,7 +334,7 @@ loop:
 		err(1, "write");
 
 	/* パケット境界を示すために少し待つ */
-	(void)usleep(250000);
+	(void)usleep(70000);
 
 	goto loop;
 	/* NOTREACHED */
