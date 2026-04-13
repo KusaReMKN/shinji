@@ -170,6 +170,13 @@ init_interface(const char *ifname, int mtu, const char *cidr)
 	if (ioctl(sock, SIOCSIFNETMASK, &ifr) == -1)
 		err(EXIT_FAILURE, "SIOCSIFNETMASK");
 
+	/* デバイスの送信キューの長さを設定する */
+	(void)memset(&ifr, 0, sizeof(ifr));
+	(void)snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+	ifr.ifr_qlen = 1;
+	if (ioctl(sock, SIOCSIFTXQLEN, &ifr) == -1)
+		err(EXIT_FAILURE, "SIOCSIFTXQLEN");
+
 	/* ブロードキャストアドレスを設定する */
 	(void)memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
