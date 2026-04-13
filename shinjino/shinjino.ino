@@ -27,9 +27,25 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <cstdint>
+#include <deque>
+
+#include <TimerTC3.h>
+
 #define PIN_AUX	(D1)
 
+#define LRWAIT	7500
+#define PCWAIT	75000
 #define TIC	100
+#define DT	57
+
+static volatile uint64_t sysClock;
+
+void
+tcHandler(void)
+{
+	sysClock += DT;
+}
 
 void
 setup(void)
@@ -44,6 +60,9 @@ setup(void)
 		delayMicroseconds(TIC);
 	Serial1.begin(9600);
 
+	TimerTc3.initialize(DT);
+	TimerTc3.attachInterrupt(tcHandler);
+
 	while (digitalRead(PIN_AUX) == LOW)
 		delayMicroseconds(TIC);
 }
@@ -51,9 +70,34 @@ setup(void)
 void
 loop(void)
 {
-	while (Serial1.available() > 0)
+	static std::deque<std::deque<char>> queue;
+
+	static std::deque<char> buf;
+	static uint64_t lastClock, lastLoRa;
+
+	/* LoRa から受信した文字は PC へすぐに送る */
+	if (Serial1.available() > 0)
 		Serial.write(Serial1.read());
 
-	while (Serial.available() > 0)
-		Serial1.write(Serial.read());
+	/* PC から受信した文字は一旦バッファする */
+	if (Serial.available() > 0) {
+		buf.push_back(Serial.read());
+		lastClock = sysClock;
+	}
+
+	/* PC から受信しなくなって久しければ送信キューへ入れる */
+	if (lastClock > 0 && sysClock - lastClock > PCWAIT) {
+		queue.push_back(buf);
+		buf.clear();
+		lastClock = 0;
+	}
+
+	/* 送信キューが空でなく、送信可能であれば LoRa へ送る */
+	if (!queue.empty() && sysClock - lastLoRa > LRWAIT
+			&& digitalRead(PIN_AUX) == HIGH) {
+		for (const auto c: queue[0])
+			Serial1.write(c);
+		queue.pop_front();
+		lastLoRa = sysClock;
+	}
 }
