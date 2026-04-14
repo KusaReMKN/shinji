@@ -33,6 +33,7 @@
 #include <TimerTC3.h>
 
 #define PIN_AUX	(D1)
+#define PIN_MOD	(D2)
 
 #define LRWAIT	7500
 #define PCWAIT	75000
@@ -47,10 +48,19 @@ tcHandler(void)
 	sysClock += DT;
 }
 
+static volatile bool resetSerial1;
+
+void
+modHandler(void)
+{
+	resetSerial1 = true;
+}
+
 void
 setup(void)
 {
 	pinMode(PIN_AUX, INPUT);
+	pinMode(PIN_MOD, INPUT_PULLUP);
 
 	while (!Serial)
 		delayMicroseconds(TIC);
@@ -63,6 +73,8 @@ setup(void)
 	TimerTc3.initialize(DT);
 	TimerTc3.attachInterrupt(tcHandler);
 
+	attachInterrupt(digitalPinToInterrupt(PIN_MOD), modHandler, CHANGE);
+
 	while (digitalRead(PIN_AUX) == LOW)
 		delayMicroseconds(TIC);
 }
@@ -74,6 +86,13 @@ loop(void)
 
 	static std::deque<char> buf;
 	static uint64_t lastClock, lastLoRa;
+
+	/* LoRa との通信を再設定する */
+	if (resetSerial1) {
+		Serial1.end();
+		Serial1.begin(digitalRead(PIN_MOD) == HIGH ? 9600 : 115200);
+		resetSerial1 = false;
+	}
 
 	/* LoRa から受信した文字は PC へすぐに送る */
 	if (Serial1.available() > 0)
