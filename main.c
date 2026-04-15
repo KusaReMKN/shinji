@@ -390,6 +390,6 @@ tun_alloc(char *ifname)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: shinjid <LoRa> <CIDR>\n");
+	fprintf(stderr, "usage: shinjicom <LoRa> <CIDR>\n");
 	exit(EXIT_FAILURE);
 }
