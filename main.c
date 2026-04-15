@@ -72,9 +72,8 @@ int
 main(int argc, char *argv[])
 {
 	struct loratun lt;
-	fd_set rfds;
 	pthread_t rxthread, txthread;
-	int error, lorafd, nfds, tunfd;
+	int lorafd, tunfd;
 	char ifname[IFNAMSIZ] = IFNAME;
 
 	if (argc != 3)
@@ -128,7 +127,7 @@ init_interface(const char *ifname, int mtu, const char *cidr)
 	struct ifreq ifr;
 	uint32_t mask;
 	int masklen, sock;
-	char *slash, tail;
+	char tail;
 	char addr[] = "XXX.XXX.XXX.XXX";
 
 	/* 作業用ソケットを開く */
