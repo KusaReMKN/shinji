@@ -77,6 +77,8 @@ setup(void)
 
 	while (digitalRead(PIN_AUX) == LOW)
 		delayMicroseconds(TIC);
+
+	resetSerial1 = true;
 }
 
 void
